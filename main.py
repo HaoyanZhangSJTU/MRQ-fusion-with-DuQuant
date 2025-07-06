@@ -98,7 +98,7 @@ def evaluate(lm, args, logger):
         for dataset in ["wikitext2", 'c4']:
             cache_testloader = f'{args.cache_dir}/testloader_{args.model_family}_{dataset}_all.cache'
             if os.path.exists(cache_testloader):
-                testloader = torch.load(cache_testloader)
+                testloader = torch.load(cache_testloader, weights_only=False)
                 logger.info(f"load calibration from {cache_testloader}")
             else:
                 dataloader, testloader = get_loaders(
@@ -366,7 +366,8 @@ def main():
     args.act_quant_params = {
         "n_bits":  args.abits,
         "per_channel_axes": [],
-        "symmetric": False,
+        # "symmetric": False,
+        "symmetric": args.symmetric,
         "lac":args.lac,
         "act_group_size": args.act_group_size,
         "dynamic_method": args.a_dynamic_method,

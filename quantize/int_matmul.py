@@ -27,7 +27,8 @@ class QuantMatMul(nn.Module):
 
     def set_quant_state(self, weight_quant: bool = False, act_quant: bool = False):
         self.use_weight_quant = weight_quant
-        self.use_act_quant = act_quant
+        # self.use_act_quant = act_quant
+        self.use_act_quant = False
 
     def quant_x1(self, x1):
         if self.use_act_quant:

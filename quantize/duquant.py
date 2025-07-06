@@ -332,6 +332,7 @@ def duquant(
                         loss = loss_func(fp_inps[index:index+args.batch_size,], quant_out)
                         if args.aug_loss:
                             loss += loss_func(fp_inps_2[index:index+args.batch_size,], quant_out)
+                        # print("done", flush=True)
 
                     if not math.isfinite(loss.item()):
                         logger.info("Loss is NAN, stopping training")

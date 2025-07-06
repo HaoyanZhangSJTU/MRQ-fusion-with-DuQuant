@@ -15,6 +15,9 @@ import copy
 from models.transformation import *
 
 
+static_var = 0
+
+
 class QuantLlamaMLP(nn.Module):
     def __init__(
         self,
@@ -28,13 +31,17 @@ class QuantLlamaMLP(nn.Module):
         
         self.gate_proj = QuantLinear(org_module.gate_proj,
                                            args.gate_weight_quant_params,
-                                           args.gate_act_quant_params)
+                                           args.gate_act_quant_params,
+                                           layer_name="gate_proj")
         self.down_proj = QuantLinear(org_module.down_proj,
                                            args.down_weight_quant_params,
-                                           args.down_act_quant_params)
+                                           args.down_act_quant_params,
+                                           layer_name="down_proj"
+                                           )
         self.up_proj = QuantLinear(org_module.up_proj,
                                            args.up_weight_quant_params,
-                                           args.up_act_quant_params)
+                                           args.up_act_quant_params,
+                                           layer_name="up_proj")
         self.act_fn = ACT2FN[hidden_act]
         self.init_duquant_params = torch.tensor(0) if args.gate_weight_quant_params['quant_method'] == 'duquant' else torch.tensor(1)
 
@@ -76,19 +83,22 @@ class QuantLlamaAttention(nn.Module):
             org_module.k_proj,
             args.k_weight_quant_params,
             args.k_act_quant_params,
+            layer_name="k_proj"
         )
         self.v_proj = QuantLinear(
             org_module.v_proj,
             args.v_weight_quant_params,
             args.v_act_quant_params,
+            layer_name="v_proj"
         )
         self.q_proj = QuantLinear(
             org_module.q_proj,
             args.q_weight_quant_params,
             args.q_act_quant_params,
+            layer_name="q_proj"
         )
         self.o_proj = QuantLinear(
-            org_module.o_proj, args.o_weight_quant_params, args.o_act_quant_params
+            org_module.o_proj, args.o_weight_quant_params, args.o_act_quant_params, layer_name="o_proj"
         )
         self.qkt_matmul = QuantMatMul(
             args.q_quant_params, args.k_quant_params, matmul_func=torch.matmul, rotate=None
