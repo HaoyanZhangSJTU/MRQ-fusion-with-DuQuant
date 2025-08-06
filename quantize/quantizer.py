@@ -10,30 +10,59 @@ import random
 
 
 import numpy as np
-import matplotlib.pyplot as plt
+
 import datetime
 
 import os
 
 
+# def round_ste(x: torch.Tensor):
+#     """
+#     Implement Straight-Through Estimator for rounding operation.
+#     """
+#     quant_grid = torch.tensor([0.0,  0.5,  1.0,  1.5,  2.0,  3.0,  4.0,  6.0,
+#                                       -0.0, -0.5, -1.0, -1.5, -2.0, -3.0, -4.0, -6.0]).to(x.device).to(x.dtype)
+
+#     # quant_grid = torch.tensor([0.0,  1.0,  2.0,  3.0,  4.0, 5.0,  6.0, 7.0,
+#     #                                   -0.0, -1.0, -2.0, -3.0, -4.0, -5.0, -6.0, -7.0]).to(x.device).to(x.dtype) * 6.0 / 7.0
+
+#     labels = (x.unsqueeze(-1) - quant_grid).abs().argmin(dim=-1)
+#     # print(labels, labels.shape, quant_grid, quant_grid.shape)
+#     x_deq = quant_grid[labels]
+#     # return (x.round() - x).detach() + x
+    
+    
+    
+    # return x_deq
+    
 def round_ste(x: torch.Tensor):
     """
     Implement Straight-Through Estimator for rounding operation.
     """
+    # return (x.round() - x).detach() + x
+
     quant_grid = torch.tensor([0.0,  0.5,  1.0,  1.5,  2.0,  3.0,  4.0,  6.0,
                                       -0.0, -0.5, -1.0, -1.5, -2.0, -3.0, -4.0, -6.0]).to(x.device).to(x.dtype)
-
-    # quant_grid = torch.tensor([0.0,  1.0,  2.0,  3.0,  4.0, 5.0,  6.0, 7.0,
-    #                                   -0.0, -1.0, -2.0, -3.0, -4.0, -5.0, -6.0, -7.0]).to(x.device).to(x.dtype) * 6.0 / 7.0
-
-    labels = (x.unsqueeze(-1) - quant_grid).abs().argmin(dim=-1)
-    # print(labels, labels.shape, quant_grid, quant_grid.shape)
-    x_deq = quant_grid[labels]
+    
+    # labels = (x.unsqueeze(-1) - quant_grid).abs().argmin(dim=-1)
+    # # print(labels, labels.shape, quant_grid, quant_grid.shape)
+    # x_deq = quant_grid[labels]
+    # return x_deq
     # return (x.round() - x).detach() + x
     
     
+    batch_num = 4
+    assert x.shape[0] % batch_num == 0
+    batch_size = x.shape[0] // batch_num
+    tensor_deq = torch.zeros_like(x)
+    for idx in range(batch_num):
+        tensor_par = x[idx*batch_size : (idx+1)*batch_size, :]
+        labels = ((tensor_par).unsqueeze(-1) - quant_grid).abs().argmin(dim=-1)
+        tensor_q_par = quant_grid[labels] 
+        tensor_deq[idx*batch_size : (idx+1)*batch_size, :] = tensor_q_par
     
-    return x_deq
+    
+    return tensor_deq
     
 
 
@@ -129,6 +158,7 @@ class UniformAffineQuantizer(nn.Module):
                 self.init_duquant_params = torch.tensor(0)
                 
         self.layer_name = None
+        self.layer_id = None
         self.draw = False
         
         
@@ -138,6 +168,8 @@ class UniformAffineQuantizer(nn.Module):
         
         self.inp_for_w = None
         self.w_for_a = None
+        
+        self.skip_quant = False
 
     def change_n_bits(self, n_bits):
         self.n_bits = n_bits
@@ -148,6 +180,9 @@ class UniformAffineQuantizer(nn.Module):
         if self.deficiency > 0:
             pad_zeros = torch.zeros((x.shape[0],self.deficiency),dtype=x.dtype,device=x.device)
             x = torch.cat((x,pad_zeros),dim=1)
+            
+        if scale is None:
+            return x
         
         # exit()
         if self.group_size:
@@ -159,6 +194,7 @@ class UniformAffineQuantizer(nn.Module):
         # exit()
         
         org_shape = x.shape
+        # print(org_shape, flush=True)
         x_uq = x.reshape(-1, 32)            
         
             
@@ -167,12 +203,17 @@ class UniformAffineQuantizer(nn.Module):
         # if round_zero_point is not None:
         #     # print(round_zero_point)
         #     x_int = x_int.add(round_zero_point)
+        
         x_int = x_int.clamp(self.qmin, self.qmax) 
 
         x_dequant = x_int
         # if round_zero_point is not None:
         #     x_dequant = x_dequant.sub(round_zero_point)
-        x_dequant = x_dequant.mul(scale)
+        if scale is not None:
+            x_dequant = x_dequant.mul(scale)
+        
+        assert torch.isnan(x_dequant).to(torch.int32).sum(0).sum(0) == 0, "NAN"
+        assert torch.isinf(x_dequant).to(torch.int32).sum(0).sum(0) == 0, "inf"
 
         if self.group_size:
             x_dequant = x_dequant.reshape(dim1, dim2)
@@ -342,9 +383,10 @@ class UniformAffineQuantizer(nn.Module):
             self.R = torch.cat((self.R, R.unsqueeze(0)), dim=0)
         return weight
 
-    def init_duquant(self, x: torch.Tensor):
+    def init_duquant(self, x: torch.Tensor, q_flag:bool=False):
         if self.quant_method is None:
             return x
+        
         if self.rotate is None:
                 x_shape = x.shape   # (n_tokens, hidden_dim) / (out_features, in_features)
                 hadamard = self.H.to(x)
@@ -374,17 +416,47 @@ class UniformAffineQuantizer(nn.Module):
                     if len(self.R) > 0:
                         x = x.reshape(-1, self.block_size)
                         R = self.R[-1].to(x)
+                        # x = x.matmul(R)
                         x = x.matmul(R).reshape(x_size) 
+                        
+                        
+                        
+                    if q_flag == True:
+                        x = x.reshape(-1, 128)
+                        
+                        shift = 16
+
+                        x = torch.cat((x[:, -shift:],x[:, :-shift]),dim=1).to(x)
+                        
+                        x = x.reshape(-1, self.block_size)
+                        # rotate
+                        
+                        R = self.R[-1].to(x)
+                        x = x.matmul(R).reshape(x_size) 
+                        
+                        
+                        # x_slice = x[:, 0:128].clone().detach()
+                        # shift = 16
+                        # x_slice = torch.cat((x_slice[:, -shift:],x_slice[:, :-shift]),dim=1).to(x)
+                        # x_slice_shape = x_slice.shape
+                        # x_slice = x_slice.reshape(-1, self.block_size)
+                        # R = self.R[-1].to(x)
+                        # x_slice = x_slice.matmul(R).reshape(x_slice_shape)
+                        
+                        # x = torch.cat((x_slice, x[:, 128:]), dim=1)
+                        # x = x.reshape(-1, self.block_size)
+                        # R = self.R[-1].to(x)
+                        # x = x.matmul(R).reshape(x_size) 
+                        
         else:
             raise NotImplementedError
-        return x
+        return nn.Parameter(x)
             
+# activation: [M, K]
+# weight: [N, K]
 
     def forward(self, x: torch.Tensor, return_no_quant=False):
         
-        # if self.layer_name:
-        #     layer_id = (my_function() - 1) // 7
-        #     distri_3d(x.abs().squeeze(0).T, layer_name=self.layer_name, layer_idx=layer_id, desc="before")
         
         
         if hasattr(self, 'smooth_scales'):
@@ -398,19 +470,44 @@ class UniformAffineQuantizer(nn.Module):
 
             
         if self.dynamic_method == "per_token" or self.dynamic_method == "per_channel":
-            x = self.init_duquant(x)
+            # x = self.init_duquant(x, q_flag=False)
+            # if self.layer_name:
+            # if (self.layer_name == 'q_proj' or self.layer_name == 'k_proj' or self.layer_name == 'v_proj' or self.layer_name == 'mlp.up_proj' or self.layer_name == 'mlp.gate_proj'):
+            if (self.layer_id <=5 or self.layer_id >= 69) and self.a:
+                x = self.init_duquant(x, q_flag=False)
+                if self.w_for_a is not None:
+                    del self.w_for_a
+                    torch.cuda.empty_cache()
+                return x
+                
+            else:
+                x = self.init_duquant(x, q_flag=False)            
+            
+        # if self.layer_name:
+        #     # layer_id = (my_function() - 1) // 7
+            
+        #     if self.layer_id <=6 and (self.layer_name == 'q_proj' or self.layer_name == 'k_proj' or self.layer_name == 'v_proj') and self.a == True:
+        #         # self.a
+        #         return x
+            # distri_3d(x.abs().squeeze(0).T, layer_name=self.layer_name, layer_idx=layer_id, desc="before")
+        
+        
             
         # if self.layer_name:
         #     distri_3d(x.abs().squeeze(0).T, layer_name=self.layer_name, layer_idx=layer_id, desc="after")
         
         if self.w and self.inp_for_w != None:
-            self.inp_for_w = self.init_duquant(self.inp_for_w)
+            if (self.layer_name == 'q_proj' or self.layer_name == 'k_proj' or self.layer_name == 'v_proj' or self.layer_name == 'mlp.up_proj' or self.layer_name == 'mlp.gate_proj'):
+ 
+                self.inp_for_w = self.init_duquant(self.inp_for_w, q_flag=False)
             
             
             
             
         if self.a and self.w_for_a != None:
-            self.w_for_a = self.init_duquant(self.w_for_a)
+            if  (self.layer_name == 'q_proj' or self.layer_name == 'k_proj' or self.layer_name == 'v_proj' or self.layer_name == 'mlp.up_proj' or self.layer_name == 'mlp.gate_proj'):
+ 
+                self.w_for_a = self.init_duquant(self.w_for_a, q_flag=False)
             
             
             # self.a = False
@@ -450,6 +547,9 @@ class UniformAffineQuantizer(nn.Module):
         return x_dequant
 
     def per_token_dynamic_calibration(self, x):
+        if self.skip_quant:
+            self.scale = None
+            return
         if self.group_size:
             if self.deficiency == 0:
                 x = x.reshape(-1,self.group_size)
@@ -504,19 +604,17 @@ class UniformAffineQuantizer(nn.Module):
             # scale = abs_max / (2**(self.n_bits-1)-1)
             
             quant_grid = torch.tensor([0.0,  0.5,  1.0,  1.5,  2.0,  3.0,  4.0,  6.0,
-                                      -0.0, -0.5, -1.0, -1.5, -2.0, -3.0, -4.0, -6.0]).to(abs_max.device).to(abs_max.dtype)
+                                      -0.0, -0.5, -1.0, -1.5, -2.0, -3.0, -4.0, -6.0]).to(abs_max.device).to(torch.half)
             
-            # quant_grid = torch.tensor([0.0,  1.0,  2.0,  3.0,  4.0, 5.0,  6.0, 7.0,
-            #                           -0.0, -1.0, -2.0, -3.0, -4.0, -5.0, -6.0, -7.0]).to(abs_max.device).to(abs_max.dtype)
-            
+
             max_quant_val = max(quant_grid)
             
             if self.a and self.w_for_a != None:
-                search_tw = True
+                search_tw = False
                 if search_tw:
                     # search clipping ratio of activation in tensor-wise
                     min_clip_r = 0.9
-                    max_clip_r = 1.5
+                    max_clip_r = 2.0
                     
                     
                     opt_mse = 100000.0
@@ -558,7 +656,7 @@ class UniformAffineQuantizer(nn.Module):
                             
                             # tmp_mse = (d_output - origin_output).abs().to(torch.float32).amax(dim=1).mean(dim=0)
                             
-                            tmp_mse = (d_output - origin_output).abs().to(torch.float32).sum(dim=0).mean(dim=0)
+                            tmp_mse = (d_output - origin_output).abs().to(torch.float32).mean(dim=0).mean(dim=0)
                             # print(kl_diver)
                             # print(tmp_mse)
                             if tmp_mse < opt_mse:
@@ -575,10 +673,17 @@ class UniformAffineQuantizer(nn.Module):
                     # d_input, _, _, _ = get_quant_act_mxfp(x=d_input, weight=None, quant_grid=self.quant_grid, zero_point=False, round_method="up", x_clip_r=opt_clip_r)
                     # deq_input = d_input.reshape(input.shape)
                     
-                    print(f"Opt clip ratio: {opt_clip_r}", flush=True)
+                    print(f"Opt clip ratio: {opt_clip_r}, opt mse: {opt_mse}", flush=True)
                     
-                    self.a = False
-                    del self.w_for_a
+                    
+                    if opt_mse > 0.04 :
+                        self.scale = None
+                        self.skip_quant = True
+                        return
+                    
+                self.a = False
+                del self.w_for_a
+                torch.cuda.empty_cache()
             # if self.lac:
             #     print(self.lac, flush=True)
                     
@@ -600,6 +705,7 @@ class UniformAffineQuantizer(nn.Module):
                     # deq_weight[i*N : (i+1)*N, :], _, up_ratio = get_quant_weight_mxfp(weight[i*N : (i+1)*N, :], input_x=input[i*M : (i+1)*M, :], quant_grid=self.quant_grid, zero_point=False, round_method="up")
                     if self.scale is None:
                         self.scale = get_quant_weight_mxfp(x[:,i1:i2], input_x=self.inp_for_w[:,i1:i2], quant_grid=quant_grid, zero_point=False, round_method="w_search")
+                        # print(self.scale.dtype, flush=True)
                     else:
                         tmp = get_quant_weight_mxfp(x[:,i1:i2], input_x=self.inp_for_w[:,i1:i2], quant_grid=quant_grid, zero_point=False, round_method="w_search")
                         self.scale = torch.cat((self.scale, tmp), dim=0)
@@ -609,23 +715,25 @@ class UniformAffineQuantizer(nn.Module):
                 
                 self.w = False
                 del self.inp_for_w
-                
+                torch.cuda.empty_cache()
             
             
             elif round_method == "mrq_naive":
                 abs_max = torch.max(xmax.abs(),xmin.abs())
             
                 exp = torch.floor(torch.log2(abs_max)) - torch.floor(torch.log2(max_quant_val))
-
+                
                 # scales = (max_val * alpha) / max_quant_val
-                self.scale = torch.pow(2, exp)
+                self.scale = torch.pow(2, exp).to(torch.half)
                 
             elif round_method == "normal":
+                abs_max = torch.max(xmax.abs(),xmin.abs())
                 self.scale = abs_max / max_quant_val
             
             elif round_method == "nvfp":
+                abs_max = torch.max(xmax.abs(),xmin.abs())
                 
-                scales = abs_max / max_quant_val
+                scales = (abs_max / max_quant_val).to(torch.half)
                 scales = scales.view(torch.short)
                 hi = scales & 0xFF80
                 r = scales & 0x0040
@@ -634,11 +742,14 @@ class UniformAffineQuantizer(nn.Module):
                 
                 self.scale = scales.view(torch.half)
                 
+            elif round_method == "org":
+                self.scale = None
+                
                 
             # scales_up = torch.pow(2, (torch.ceil(torch.log2(abs_max*0.88/max_quant_val))))
             # self.scale = scales_up
             
-            zero_point = 6.0 * torch.ones_like(self.scale)
+            # zero_point = 6.0 * torch.ones_like(self.scale)
             
             
             # print("asymmetric", flush=True)
@@ -646,7 +757,7 @@ class UniformAffineQuantizer(nn.Module):
             # scale = range / (2**self.n_bits-1)
             # self.scale = scale.clamp(min=CLIPMIN, max=CLIPMAX)
             # zero_point = -(xmin) / (self.scale)
-        self.round_zero_point = zero_point.clamp(min=-CLIPMAX, max=CLIPMAX).round()
+        # self.round_zero_point = zero_point.clamp(min=-CLIPMAX, max=CLIPMAX).round()
         # print(self.round_zero_point, flush=True)
         
     def register_scales_and_zeros(self):
@@ -777,77 +888,12 @@ def get_quant_weight_mxfp(w, quant_grid, input_x=None, zero_point=True, q_group_
     #     return w_deq, quant_mse_sum, labels, quant_grid * scales
     # else:
     if round_method == "w_search":
-        return scales
+        return scales.to(torch.half)
     else:
         return w_deq, quant_mse_sum, 1, scales
 
 
 
-
-
-
-
-def distri_3d(w_data, group_size=-1, layer_idx=0, layer_name="", max_fig=1000, desc=""):
-    if group_size > 0 and w_data.shape[-1] % group_size != 0:
-        print(f"Input channel: {w_data.shape[-1]} is not divisible by group_size: {group_size}")
-        return
-    
-    # Prepare data based on group_size
-    w_data_group = w_data.reshape(-1, group_size) if group_size > 0 else w_data
-
-    # Prepare 3D visualization
-    fig = plt.figure(figsize=(10, 7))
-    ax = fig.add_subplot(111, projection='3d')
-
-    # Prepare X, Y, and Z values
-    group_indices = np.arange(w_data_group.shape[0])
-    element_indices = np.arange(w_data_group.shape[1])
-    X, Y = np.meshgrid(element_indices, group_indices)
-    Z = np.abs(w_data_group.cpu().numpy())  # Use absolute value for better visualization
-
-    # Plot surface
-    percentile_range = [10, 99.7]  # 10%到99%的分位数范围
-    z_min, z_max = np.percentile(Z, percentile_range)  
-    surface = ax.plot_surface(X, Y, Z, cmap='viridis', edgecolor='none', alpha=0.8, vmin=z_min, vmax=z_max)
-    # surface = ax.plot_surface(X, Y, Z, cmap='viridis', edgecolor='none', alpha=0.8, norm=LogNorm(vmin=z_min, vmax=z_max))
-    # fig.colorbar(surface, ax=ax, shrink=0.5, aspect=10)  # 添加颜色条
-    fig.colorbar(surface, ax=ax, shrink=0.5, aspect=10, extend='both')  # extend='both' 确保颜色条包含超出范围的值
-
-    # 标注最大值
-    max_idx = np.unravel_index(Z.argmax(), Z.shape)
-    ax.text(X[max_idx], Y[max_idx], Z.max(), f'max: {Z.max():.2f}', color='red')
-        # 添加分位数信息到图像顶部
-    fig.text(
-        0.5, 0.8,  # 中心对齐，位于顶部
-        f"Percentile Range: {percentile_range[0]}% = {z_min:.4f}, {percentile_range[1]}% = {z_max:.4f}",
-        fontsize=12,
-        color='red',
-        ha='center',  # 水平居中
-        va='top',  # 垂直顶部对齐
-        bbox=dict(boxstyle="round", edgecolor="black", facecolor="white", alpha=0.8)
-    )
-
-    # elev (Elevation): 从 z 轴方向观察的角度（俯仰角），默认值是 30°。越小视角越接近xy平面，值越大越类似俯视
-    # azim (Azimuth): 绕 z 轴旋转的角度（方位角）。
-    ax.view_init(elev=10, azim=20)
-
-    ax.set_xlabel('Input Dimension')
-    ax.set_ylabel('Output Dimension (Group Index)')
-    ax.set_zlabel('Absolute Value of W')
-    ax.set_title(f"Layer {layer_idx} - {layer_name} - 3D Distribution")
-
-    # Save figure
-    # current_time = datetime.now().strftime("_%m%d%H%M")  # 格式: 月日时分 (_01071127)
-
-    save_path = os.path.join(os.getcwd(), 'distri_img')
-    os.makedirs(save_path, exist_ok=True)
-    # file_name = f"layer{layer_idx}_{layer_name}_3d_{desc}.png"
-    file_name = f"layer{layer_idx}_{layer_name}_3d_{desc}.png"
-    plt.savefig(os.path.join(save_path, file_name), dpi=600)
-    plt.close()
-
-    print(f"3D distribution plot saved at: {os.path.join(save_path, file_name)}")
-    
 
 def get_quant_act_mxfp(x, quant_grid, weight=None, zero_point=True, q_group_size=-1, pos_value=None, round_method="rtn", x_clip_r=1.0):
     '''
@@ -978,21 +1024,8 @@ def get_quant_act_mxfp(x, quant_grid, weight=None, zero_point=True, q_group_size
     #     return w_deq, quant_mse_sum, labels, quant_grid * scales
     # else:
     if round_method == "x_search":
-        return x_deq, quant_mse_sum, up_ratio, labels
+        return x_deq.to(torch.half), quant_mse_sum, up_ratio, labels
     else:
-        return x_deq, quant_mse_sum, 1, labels
+        return x_deq.to(torch.half), quant_mse_sum, 1, labels
     
     
-def my_function():
-    my_function.calls = getattr(my_function, 'calls', 0) + 1  # 初始化或递增
-    return my_function.calls
-    
-# def counter():
-#     count = 0  # 闭包变量（类似静态变量）
-
-#     def increment():
-#         nonlocal count
-#         count += 1
-#         return count
-
-#     return increment()

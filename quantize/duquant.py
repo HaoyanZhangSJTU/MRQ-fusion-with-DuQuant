@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 from models.int_llama_layer import QuantLlamaDecoderLayer
+# from models.int_llama3_linear import QuantLlamaDecoderLayer
 from models.int_mistral_layer import QuantMistralDecoderLayer
 from quantize.int_linear import QuantLinear
 from contextlib import nullcontext
@@ -123,12 +124,12 @@ def duquant(
     
     # move embedding layer and first layer to cpu
     layers[0] = layers[0].module
-    layers[0] = layers[0].cpu()
-    if "llama" in args.net.lower() or "vicuna" in args.net.lower() or "mistral" in args.net.lower():
-        model.model.embed_tokens = model.model.embed_tokens.cpu()
-        model.model.norm = model.model.norm.cpu()
-    else:
-        raise ValueError("Only support for llama/Llama-2/Llama-3/Vicuna/Mistral now")
+    # layers[0] = layers[0].cpu()
+    # if "llama" in args.net.lower() or "vicuna" in args.net.lower() or "mistral" in args.net.lower():
+    #     model.model.embed_tokens = model.model.embed_tokens.cpu()
+    #     model.model.norm = model.model.norm.cpu()
+    # else:
+    #     raise ValueError("Only support for llama/Llama-2/Llama-3/Vicuna/Mistral now")
     torch.cuda.empty_cache()
     
     quant_inps = inps
@@ -168,11 +169,15 @@ def duquant(
         args.k_quant_params = copy.copy(args.act_quant_params)
 
         logger.info(f"=== Start quantize layer {i} ===")
+        
+        # if i==0:
+        #     continue
+        
         layer = layers[i]
-        qlayer = DecoderLayer(lm.model.config, layer, args)
-        qlayer = qlayer.to(dev)        
-        if torch.cuda.device_count() > 1:
-            qlayer.mlp.to("cuda:1")
+        qlayer = DecoderLayer(lm.model.config, layer, i, args)
+        # qlayer = qlayer.to(dev)
+        # if torch.cuda.device_count() > 1:
+        #     qlayer.mlp.to("cuda:1")
 
         if args.quant_method == 'duquant':
             set_init_duquant_params_state(qlayer, True)
@@ -278,7 +283,7 @@ def duquant(
                 with torch.no_grad():
                     with torch.cuda.amp.autocast():
                         set_registered_x_none(qlayer)
-                        rotate_inps = qlayer(rotate_inps.unsqueeze(0), attention_mask=attention_mask,position_ids=position_ids)[0][0]
+                        rotate_inps = qlayer(rotate_inps.unsqueeze(0).to(qlayer.self_attn.q_proj.weight.device), attention_mask=attention_mask.to(qlayer.self_attn.q_proj.weight.device),position_ids=position_ids.to(qlayer.self_attn.q_proj.weight.device))[0][0]
             qlayer.register_duquant_params()
             set_init_duquant_params_state(qlayer, True)
         
@@ -370,13 +375,15 @@ def duquant(
                     for j in range(args.nsamples):
                         quant_inps[j] = qlayer(quant_inps[j].unsqueeze(0), attention_mask=attention_mask,position_ids=position_ids)[0]
             register_scales_and_zeros(qlayer)
-            layers[i] = qlayer.to("cpu")
+            # layers[i] = qlayer.to("cpu")
+            layers[i] = qlayer
             duquant_parameters[i] = duquant_state_dict(qlayer)
             if args.save_dir:
                 torch.save(duquant_parameters, os.path.join(args.save_dir, f"duquant_parameters.pth"))
         else:
             register_scales_and_zeros(qlayer)
-            layers[i] = qlayer.to("cpu")
+            # layers[i] = qlayer.to("cpu")
+            layers[i] = qlayer
             duquant_parameters[i] = duquant_state_dict(qlayer)
             if args.save_dir:
                 torch.save(duquant_parameters, os.path.join(args.save_dir, f"duquant_parameters.pth"))

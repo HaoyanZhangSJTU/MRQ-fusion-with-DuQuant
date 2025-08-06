@@ -25,6 +25,7 @@ class QuantLlamaMLP(nn.Module):
         hidden_size: int,
         intermediate_size: int,
         hidden_act: str,
+        layer_id:int,
         args=None,
     ):
         super().__init__()
@@ -32,16 +33,21 @@ class QuantLlamaMLP(nn.Module):
         self.gate_proj = QuantLinear(org_module.gate_proj,
                                            args.gate_weight_quant_params,
                                            args.gate_act_quant_params,
-                                           layer_name="gate_proj")
+                                           layer_name="gate_proj",
+                                           layer_id=layer_id
+                                           )
         self.down_proj = QuantLinear(org_module.down_proj,
                                            args.down_weight_quant_params,
                                            args.down_act_quant_params,
-                                           layer_name="down_proj"
+                                           layer_name="down_proj",
+                                           layer_id=layer_id
                                            )
         self.up_proj = QuantLinear(org_module.up_proj,
                                            args.up_weight_quant_params,
                                            args.up_act_quant_params,
-                                           layer_name="up_proj")
+                                           layer_name="up_proj",
+                                           layer_id=layer_id
+                                           )
         self.act_fn = ACT2FN[hidden_act]
         self.init_duquant_params = torch.tensor(0) if args.gate_weight_quant_params['quant_method'] == 'duquant' else torch.tensor(1)
 
@@ -61,6 +67,7 @@ class QuantLlamaAttention(nn.Module):
     def __init__(self, 
                  org_module: nn.Module,
                  config: LlamaConfig,
+                 layer_id,
                  args=None):
         super().__init__()
         self.config = config
@@ -70,7 +77,8 @@ class QuantLlamaAttention(nn.Module):
         self.num_key_value_heads = config.num_key_value_heads
         self.num_key_value_groups = self.num_heads // self.num_key_value_heads
         self.max_position_embeddings = config.max_position_embeddings
-
+        # self.device = org_module.device
+        
         if (self.head_dim * self.num_heads) != self.hidden_size:
             raise ValueError(
                 f"hidden_size must be divisible by num_heads (got `hidden_size`: {self.hidden_size}"
@@ -83,22 +91,25 @@ class QuantLlamaAttention(nn.Module):
             org_module.k_proj,
             args.k_weight_quant_params,
             args.k_act_quant_params,
+            layer_id=layer_id,
             layer_name="k_proj"
         )
         self.v_proj = QuantLinear(
             org_module.v_proj,
             args.v_weight_quant_params,
             args.v_act_quant_params,
+            layer_id=layer_id,
             layer_name="v_proj"
         )
         self.q_proj = QuantLinear(
             org_module.q_proj,
             args.q_weight_quant_params,
             args.q_act_quant_params,
+            layer_id=layer_id,
             layer_name="q_proj"
         )
         self.o_proj = QuantLinear(
-            org_module.o_proj, args.o_weight_quant_params, args.o_act_quant_params, layer_name="o_proj"
+            org_module.o_proj, args.o_weight_quant_params, args.o_act_quant_params, layer_id=layer_id, layer_name="o_proj"
         )
         self.qkt_matmul = QuantMatMul(
             args.q_quant_params, args.k_quant_params, matmul_func=torch.matmul, rotate=None
@@ -124,6 +135,10 @@ class QuantLlamaAttention(nn.Module):
         use_cache: bool = False,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
         bsz, q_len, _ = hidden_states.size()
+        # print(self.q_proj.weight.shape)
+        # print(self.k_proj.weight.shape)
+        # print(self.v_proj.weight.shape)
+        # print(self.o_proj.weight.shape, flush=True)
 
         query_states = self.q_proj(hidden_states).view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
         if not self.init_duquant_params:
@@ -137,7 +152,8 @@ class QuantLlamaAttention(nn.Module):
         if past_key_value is not None:
             kv_seq_len += past_key_value[0].shape[-2]
         cos, sin = self.rotary_emb(value_states, seq_len=kv_seq_len)
-        query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin, position_ids)
+        # cos, sin = self.rotary_emb(value_states, position_ids=position_ids)
+        query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin, position_ids.to(query_states.device))
 
         query_states = self.qkt_matmul.quant_x1(query_states)
         key_states = self.qkt_matmul.quant_x2(key_states)
@@ -164,13 +180,18 @@ class QuantLlamaAttention(nn.Module):
                 f" {attn_weights.size()}"
             )
 
-        if attention_mask is not None:
-            if attention_mask.size() != (bsz, 1, q_len, kv_seq_len):
-                raise ValueError(
-                    f"Attention mask should be of size {(bsz, 1, q_len, kv_seq_len)}, but is {attention_mask.size()}"
-                )
-            attn_weights = attn_weights + attention_mask
-            attn_weights = torch.max(attn_weights, torch.tensor(torch.finfo(attn_weights.dtype).min))
+        # if attention_mask is not None:
+        #     if attention_mask.size() != (bsz, 1, q_len, kv_seq_len):
+        #         raise ValueError(
+        #             f"Attention mask should be of size {(bsz, 1, q_len, kv_seq_len)}, but is {attention_mask.size()}"
+        #         )
+        #     attn_weights = attn_weights + attention_mask
+        #     attn_weights = torch.max(attn_weights, torch.tensor(torch.finfo(attn_weights.dtype).min))
+        if attention_mask is not None:  # no matter the length, we just slice it
+            causal_mask = attention_mask[:, :, :, : key_states.shape[-2]]
+            if causal_mask.device != attn_weights.device:
+                causal_mask = causal_mask.to(attn_weights.device)
+            attn_weights = attn_weights + causal_mask
 
         # upcast attention to fp32
         attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query_states.dtype)
@@ -210,12 +231,14 @@ class QuantLlamaDecoderLayer(nn.Module):
     def __init__(self, 
                  config: LlamaConfig,
                  ori_layer,
+                 layer_id,
                  args):
         super().__init__()
         self.hidden_size = config.hidden_size
         self.self_attn = QuantLlamaAttention(
             org_module=ori_layer.self_attn,
             config=config,
+            layer_id=layer_id,
             args=args,
             )
         self.mlp = QuantLlamaMLP(
@@ -223,11 +246,12 @@ class QuantLlamaDecoderLayer(nn.Module):
             hidden_size=self.hidden_size,
             intermediate_size=config.intermediate_size,
             hidden_act=config.hidden_act,
+            layer_id=layer_id,
             args=args,
         )
         self.input_layernorm = DuLlamaRMSNorm(ori_layer.input_layernorm,eps=ori_layer.input_layernorm.variance_epsilon)
         self.post_attention_layernorm = DuLlamaRMSNorm(ori_layer.post_attention_layernorm,eps=ori_layer.post_attention_layernorm.variance_epsilon)
-
+        self.device = ori_layer.self_attn.q_proj.weight.device
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -250,6 +274,7 @@ class QuantLlamaDecoderLayer(nn.Module):
                 (see `past_key_values`).
             past_key_value (`Tuple(torch.FloatTensor)`, *optional*): cached past key and value projection states
         """
+        hidden_states = hidden_states.to(self.self_attn.q_proj.weight.device)
         residual = hidden_states
         
         hidden_states = self.input_layernorm(hidden_states)

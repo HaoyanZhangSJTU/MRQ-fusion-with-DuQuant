@@ -39,7 +39,7 @@ net_choices = [
 def evaluate(lm, args, logger):
     results = {}
     if args.multigpu:
-        map_layers_to_multi_gpus(lm.model.model.layers)
+        # map_layers_to_multi_gpus(lm.model.model.layers)
         input_device = lm.model.model.layers[0].device
         output_device = lm.model.model.layers[-1].device
         assert input_device == output_device
@@ -48,7 +48,14 @@ def evaluate(lm, args, logger):
         lm.model.model.norm.to(output_device)
         lm.model.lm_head.to(output_device)
     else:
-        lm.model = lm.model.to(lm.device)
+        input_device = lm.model.model.layers[0].self_attn.q_proj.weight.device
+        output_device = lm.model.model.layers[-1].self_attn.q_proj.weight.device
+        # assert input_device == output_device
+        lm._device = input_device
+        lm.model.model.embed_tokens.to(input_device)
+        lm.model.model.norm.to(output_device)
+        lm.model.lm_head = lm.model.lm_head.to(output_device)
+        # lm.model = lm.model.to(lm.device)
 
     if args.eval_mtbench:
     # eval quantized model on MMLU
@@ -446,6 +453,7 @@ def main():
             logger,
         )
         logger.info(time.time() - tick)
+        # lm.model.save_pretrained("/localssd/hyzhang/llama-2-70b-ft", safe_serialization=False)
     evaluate(lm, args,logger)
 
 

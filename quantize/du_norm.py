@@ -59,7 +59,13 @@ class DuLlamaRMSNorm(nn.Module):
         else:
             weight = self.weight
             bias = self.bias if hasattr(self, 'bias') else None
-
+            
+        # print(f'weight.device {weight.device}', flush=True)
+        # print(f'hidden_states.device {hidden_states.device}', flush=True)
+        # print(f'bias.deivce {bias.device}',flush=True)
+        
+        hidden_states = hidden_states.to(weight.device)
+        bias = bias.to(hidden_states.device)
         return (weight * hidden_states+bias).to(input_dtype) if bias is not None else (weight * hidden_states).to(input_dtype)
 
 

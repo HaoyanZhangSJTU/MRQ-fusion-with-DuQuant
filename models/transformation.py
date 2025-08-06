@@ -85,17 +85,18 @@ def smooth_q_k_temporary(q_proj, k_proj, scales):
     k_proj.temp_bias = k_proj.temp_bias*scales.view(-1)
 
 def smooth_ln_fcs_inplace(ln, fcs, scales,shifts):
+    
     ln.use_temporary_parameter = False
     if not isinstance(fcs, list):
         fcs = [fcs]
     if hasattr(ln, 'bias') and ln.bias is not None:
-        ln.bias.sub_(shifts)
-        ln.bias.div_(scales)
+        ln.bias.sub_(shifts.to(ln.bias.device))
+        ln.bias.div_(scales.to(ln.bias.device))
     else:
         del ln.bias
         ln.register_buffer('bias',(-1*shifts)/scales)
 
-    ln.weight.div_(scales)
+    ln.weight.div_(scales.to(ln.weight.device))
     for fc in fcs:
         fc.use_temporary_parameter = False
         if hasattr(fc, 'bias') and fc.bias is not None:

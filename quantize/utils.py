@@ -181,6 +181,18 @@ def smooth_and_quant_temporary(model, args, isllama):
 @torch.no_grad()   
 def smooth_and_let_inplace(model, args):
     if args.smooth:
+        # kv_shape = model.self_attn.k_proj.weight.shape
+        # q_shape = model.self_attn.q_proj.weight.shape
+        # if kv_shape[-1] != q_shape[-1]:
+        #     rep = q_shape[-1] // kv_shape[-1]
+            
+            
+        #     k_weight = model.self_attn.k_proj.weight.view(k_weight.shape[0], 8, 128)
+        #     v_weight = model.self_attn.v_proj.weight.view(k_weight.shape[0], 8, 128)
+            
+        #     model.self_attn.k_proj.weight = torch.repeat_interleave(k_weight, dim=1, repeats=rep).view(k_weight.shape[0], -1)
+        #     model.self_attn.v_proj.weight = torch.repeat_interleave(v_weight, dim=1, repeats=rep).view(k_weight.shape[0], -1)
+            
         for name, module in model.named_parameters():
             if "smooth_scale" in name:
                 module.data = truncate_number(module)
@@ -189,6 +201,19 @@ def smooth_and_let_inplace(model, args):
                                 model.fc1_smooth_scale,model.fc1_smooth_shift)
         smooth_fc_fc_inplace(model.mlp.up_proj,model.mlp.down_proj,
                             model.down_smooth_scale, model.down_smooth_shift)
+        
+        
+        
+        # if kv_shape[-1] != q_shape[-1]:
+        #     rep = q_shape[-1] // kv_shape[-1]
+            
+            
+        #     k_weight = model.self_attn.k_proj.weight.view(k_weight.shape[0], 8, 128)
+        #     v_weight = model.self_attn.v_proj.weight.view(k_weight.shape[0], 8, 128)
+            
+        #     model.self_attn.k_proj.weight = torch.repeat_interleave(k_weight, dim=1, repeats=rep).view(k_weight.shape[0], -1)
+        #     model.self_attn.v_proj.weight = torch.repeat_interleave(v_weight, dim=1, repeats=rep).view(k_weight.shape[0], -1)
+        
         try:
             smooth_fc_fc_inplace(model.self_attn.v_proj,model.self_attn.o_proj,
                                 model.out_smooth_scale, model.out_smooth_shift)
