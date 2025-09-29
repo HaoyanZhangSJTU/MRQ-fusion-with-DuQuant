@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 from models.int_llama_layer import QuantLlamaDecoderLayer
+from models.int_qwen3_layer import QuantQwen3DecoderLayer
 # from models.int_llama3_linear import QuantLlamaDecoderLayer
 from models.int_mistral_layer import QuantMistralDecoderLayer
 from quantize.int_linear import QuantLinear
@@ -77,6 +78,19 @@ def duquant(
             "down_proj":"down",
         }
         layer_name_prefix = "model.layers"
+    elif "qwen3" in args.net.lower(): 
+        is_llama = True  # [QWEN3] Qwen3 也需要 position_ids，沿用 is_llama 逻辑
+        layers = model.model.layers  
+        model.model.embed_tokens = model.model.embed_tokens.to(dev) 
+        model.model.norm = model.model.norm.to(dev) 
+        DecoderLayer = QuantQwen3DecoderLayer  # [QWEN3]
+        pairs = {  # [QWEN3] 命名与 LLaMA 基本一致
+            "q_proj":"qkv",
+            "o_proj":"out",
+            "up_proj":"fc1",
+            "down_proj":"down",
+        }
+        layer_name_prefix = "model.layers"  
     else:
         raise ValueError("Only support for llama/Llama-2/Llama-3/Vicuna/Mistral now")
     
