@@ -20,6 +20,10 @@ class QuantMatMul(nn.Module):
         self.i_cluster_counts = None
         self.x1_quantizer = UniformAffineQuantizer(**x1_quant_params,rotate=rotate)
         self.x2_quantizer = UniformAffineQuantizer(**x2_quant_params,rotate=rotate)
+        self.x2_quantizer.dynamic_method = "kv_mode"
+        # print(self.x2_quantizer.lac, flush=True)
+        # exit()
+        self.x2_quantizer.a = True
         self.matmul_func = matmul_func
 
         self.disable_act_quant = disable_act_quant
@@ -27,17 +31,17 @@ class QuantMatMul(nn.Module):
 
     def set_quant_state(self, weight_quant: bool = False, act_quant: bool = False):
         self.use_weight_quant = weight_quant
-        # self.use_act_quant = act_quant
-        self.use_act_quant = False
+        self.use_act_quant = act_quant
+        # self.use_act_quant = False
 
     def quant_x1(self, x1):
-        if self.use_act_quant:
-            x1 = self.x1_quantizer(x1)
+        # if self.use_act_quant:
+            # x1 = self.x1_quantizer(x1)
         return x1
 
     def quant_x2(self, x2):
-        if self.use_act_quant:
-            x2 = self.x2_quantizer(x2)
+        # if self.use_act_quant:
+        x2 = self.x2_quantizer(x2)
         return x2
 
     def forward(self, x1, x2):

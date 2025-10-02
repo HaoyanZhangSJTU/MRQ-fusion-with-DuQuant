@@ -51,7 +51,7 @@ def round_ste(x: torch.Tensor):
     # return (x.round() - x).detach() + x
     
     
-    batch_num = 4
+    batch_num = 8
     assert x.shape[0] % batch_num == 0
     batch_size = x.shape[0] // batch_num
     tensor_deq = torch.zeros_like(x)
@@ -199,10 +199,6 @@ class UniformAffineQuantizer(nn.Module):
         
             
         x_int = round_ste(x_uq.float() / scale).half()    # avoid overflow
-        
-        # if round_zero_point is not None:
-        #     # print(round_zero_point)
-        #     x_int = x_int.add(round_zero_point)
         
         x_int = x_int.clamp(self.qmin, self.qmax) 
 
@@ -416,44 +412,23 @@ class UniformAffineQuantizer(nn.Module):
                     if len(self.R) > 0:
                         x = x.reshape(-1, self.block_size)
                         R = self.R[-1].to(x)
-                        # x = x.matmul(R)
                         x = x.matmul(R).reshape(x_size) 
-                        
-                        
-                        
                     if q_flag == True:
-                        x = x.reshape(-1, 128)
-                        
-                        shift = 16
-
-                        x = torch.cat((x[:, -shift:],x[:, :-shift]),dim=1).to(x)
-                        
                         x = x.reshape(-1, self.block_size)
+                        # reorder
+                        I = torch.eye(self.block_size)
+                        shift = self.block_size / 2
+                        
+                        P = torch.cat(I[:, shift:], I[:, :shift])
+                        x = x.matmul(P)
                         # rotate
                         
                         R = self.R[-1].to(x)
                         x = x.matmul(R).reshape(x_size) 
-                        
-                        
-                        # x_slice = x[:, 0:128].clone().detach()
-                        # shift = 16
-                        # x_slice = torch.cat((x_slice[:, -shift:],x_slice[:, :-shift]),dim=1).to(x)
-                        # x_slice_shape = x_slice.shape
-                        # x_slice = x_slice.reshape(-1, self.block_size)
-                        # R = self.R[-1].to(x)
-                        # x_slice = x_slice.matmul(R).reshape(x_slice_shape)
-                        
-                        # x = torch.cat((x_slice, x[:, 128:]), dim=1)
-                        # x = x.reshape(-1, self.block_size)
-                        # R = self.R[-1].to(x)
-                        # x = x.matmul(R).reshape(x_size) 
-                        
         else:
             raise NotImplementedError
         return nn.Parameter(x)
             
-# activation: [M, K]
-# weight: [N, K]
 
     def forward(self, x: torch.Tensor, return_no_quant=False):
         
@@ -470,18 +445,8 @@ class UniformAffineQuantizer(nn.Module):
 
             
         if self.dynamic_method == "per_token" or self.dynamic_method == "per_channel":
-            # x = self.init_duquant(x, q_flag=False)
-            # if self.layer_name:
-            # if (self.layer_name == 'q_proj' or self.layer_name == 'k_proj' or self.layer_name == 'v_proj' or self.layer_name == 'mlp.up_proj' or self.layer_name == 'mlp.gate_proj'):
-            if (self.layer_id <=5 or self.layer_id >= 69) and self.a:
-                x = self.init_duquant(x, q_flag=False)
-                if self.w_for_a is not None:
-                    del self.w_for_a
-                    torch.cuda.empty_cache()
-                return x
-                
-            else:
-                x = self.init_duquant(x, q_flag=False)            
+            x = self.init_duquant(x)
+            
             
         # if self.layer_name:
         #     # layer_id = (my_function() - 1) // 7
@@ -497,17 +462,13 @@ class UniformAffineQuantizer(nn.Module):
         #     distri_3d(x.abs().squeeze(0).T, layer_name=self.layer_name, layer_idx=layer_id, desc="after")
         
         if self.w and self.inp_for_w != None:
-            if (self.layer_name == 'q_proj' or self.layer_name == 'k_proj' or self.layer_name == 'v_proj' or self.layer_name == 'mlp.up_proj' or self.layer_name == 'mlp.gate_proj'):
- 
-                self.inp_for_w = self.init_duquant(self.inp_for_w, q_flag=False)
+            self.inp_for_w = self.init_duquant(self.inp_for_w)
             
             
             
             
         if self.a and self.w_for_a != None:
-            if  (self.layer_name == 'q_proj' or self.layer_name == 'k_proj' or self.layer_name == 'v_proj' or self.layer_name == 'mlp.up_proj' or self.layer_name == 'mlp.gate_proj'):
- 
-                self.w_for_a = self.init_duquant(self.w_for_a, q_flag=False)
+            self.w_for_a = self.init_duquant(self.w_for_a)
             
             
             # self.a = False
@@ -539,7 +500,7 @@ class UniformAffineQuantizer(nn.Module):
         if self.metric == "fix0to1":
             return x.mul_(2**self.n_bits-1).round_().div_(2**self.n_bits-1)
 
-        if self.dynamic_method == "per_token" or self.dynamic_method == "per_channel":
+        if self.dynamic_method == "per_token" or self.dynamic_method == "per_channel" or self.dynamic_method == "kv_mode":
             self.per_token_dynamic_calibration(x)
         else:
             raise NotImplementedError()
@@ -550,13 +511,7 @@ class UniformAffineQuantizer(nn.Module):
         if self.skip_quant:
             self.scale = None
             return
-        if self.group_size:
-            if self.deficiency == 0:
-                x = x.reshape(-1,self.group_size)
-            else:
-                pad_zeros = torch.zeros((x.shape[0],self.deficiency),dtype=x.dtype,device=x.device)
-                x = torch.cat((x,pad_zeros),dim=1)
-                x = x.reshape(-1,self.group_size)
+        
         reduce_shape = [-1]
         
         org_shape = x.shape
@@ -577,189 +532,173 @@ class UniformAffineQuantizer(nn.Module):
         #     xmax = self.lac*xmax
         #     xmin = self.lac*xmin
 
-        if self.symmetric:
-            print("exist", flush=True)
-            abs_max = torch.max(xmax.abs(),xmin.abs())
-            scale = abs_max / (2**(self.n_bits-1)-1)
-            
-            # quant_grid = torch.tensor([0.0,  0.5,  1.0,  1.5,  2.0,  3.0,  4.0,  6.0,
-            #                           -0.0, -0.5, -1.0, -1.5, -2.0, -3.0, -4.0, -6.0]).to(abs_max.device).to(abs_max.dtype)
-            # max_quant_val = max(quant_grid)
-            
-            # exp = torch.floor(torch.log2(abs_max)) - torch.floor(torch.log2(max_quant_val))
-            # # scales = (max_val * alpha) / max_quant_val
-            # self.scale = torch.pow(2, exp)
-            
-            # print("symmetric", flush=True)
-    
-
-            
-            self.scale = scale.clamp(min=CLIPMIN, max=CLIPMAX)
-            zero_point = (2**(self.n_bits-1)-1)*torch.ones_like(self.scale)
-        else:
-            round_method = "mrq_naive"
-            
-            
-            abs_max = torch.max(xmax.abs(),xmin.abs())
-            # scale = abs_max / (2**(self.n_bits-1)-1)
-            
-            quant_grid = torch.tensor([0.0,  0.5,  1.0,  1.5,  2.0,  3.0,  4.0,  6.0,
-                                      -0.0, -0.5, -1.0, -1.5, -2.0, -3.0, -4.0, -6.0]).to(abs_max.device).to(torch.half)
-            
-
-            max_quant_val = max(quant_grid)
-            
-            if self.a and self.w_for_a != None:
-                search_tw = False
-                if search_tw:
-                    # search clipping ratio of activation in tensor-wise
-                    min_clip_r = 0.9
-                    max_clip_r = 2.0
-                    
-                    
-                    opt_mse = 100000.0
-                    if len(x.shape) > 2:
-                        x = x.reshape(x.shape[-2], x.shape[-1])
-                    
-                    origin_output = torch.mm(x, (self.w_for_a.T))
-                    
-                    origin_input = x.reshape(-1, 32)
-                    
-                    origin_max = origin_input.abs().amax(dim=1, keepdim=True)
-                    
-                    
-                    
-                    while max_clip_r - min_clip_r > 0.005:
-                        step = (max_clip_r - min_clip_r) / 5
-                        for clip_r in np.arange(min_clip_r, max_clip_r+step, step):
-                            
-                            d_input = x.reshape(-1, 32)
-                            d_input, _, _, _ = get_quant_act_mxfp(x=d_input, quant_grid=quant_grid, zero_point=False, round_method="rtn", x_clip_r=clip_r)
-                            d_input = d_input.reshape(x.shape)
-                            
-                            # minimize the quantization error of outliers
-                            d_output = torch.mm(d_input, self.w_for_a.T)
-                            
-                            
-                            # tmp_mse = ((d_max - origin_max).to(torch.float32) / origin_max.to(torch.float32)).abs().mean(dim=0)
-                            
-                            # kl divergence
-                            # div = d_output.abs() / origin_output.abs()
-                            # div = torch.where(torch.isinf(div), torch.ones_like(div).to(div.device), div)
-                            # div = torch.where(torch.isnan(div), torch.ones_like(div).to(div.device), div)
-                            
-                            # kl_diver = ((div) * d_output.abs()).to(torch.float32).mean(dim=1).sum(dim=0)
-                            
-                            # tmp_mse = (d_output - origin_output).abs().to(torch.float32).sum(dim=1).mean(dim=0)
-                            
-                            
-                            
-                            # tmp_mse = (d_output - origin_output).abs().to(torch.float32).amax(dim=1).mean(dim=0)
-                            
-                            tmp_mse = (d_output - origin_output).abs().to(torch.float32).mean(dim=0).mean(dim=0)
-                            # print(kl_diver)
-                            # print(tmp_mse)
-                            if tmp_mse < opt_mse:
-                                opt_mse = tmp_mse
-                                opt_clip_r = clip_r
-                                
-                                
-                        max_clip_r = opt_clip_r + step
-                        min_clip_r = opt_clip_r - step
-                        
-                    self.lac = opt_clip_r
-                    # self.x_clip_tw = opt_clip_r
-                    # d_input = input.reshape(-1, 32)
-                    # d_input, _, _, _ = get_quant_act_mxfp(x=d_input, weight=None, quant_grid=self.quant_grid, zero_point=False, round_method="up", x_clip_r=opt_clip_r)
-                    # deq_input = d_input.reshape(input.shape)
-                    
-                    print(f"Opt clip ratio: {opt_clip_r}, opt mse: {opt_mse}", flush=True)
-                    
-                    
-                    if opt_mse > 0.04 :
-                        self.scale = None
-                        self.skip_quant = True
-                        return
-                    
-                self.a = False
-                del self.w_for_a
-                torch.cuda.empty_cache()
-            # if self.lac:
-            #     print(self.lac, flush=True)
-                    
-                
-            if self.swc:
-                xmax = self.swc*xmax
-                xmin = self.swc*xmin
-            elif self.lwc:
-                xmax = self.sigmoid(self.upbound_factor.to(x.device))*xmax
-                xmin = self.sigmoid(self.lowbound_factor.to(x.device))*xmin
-            elif self.lac:
-                xmax = self.lac*xmax
-                xmin = self.lac*xmin
-            
-            if self.w and self.inp_for_w != None:
-                
-                for i1 in range(0, x.shape[-1], 32):
-                    i2 = min(i1 + 32, x.shape[-1])
-                    # deq_weight[i*N : (i+1)*N, :], _, up_ratio = get_quant_weight_mxfp(weight[i*N : (i+1)*N, :], input_x=input[i*M : (i+1)*M, :], quant_grid=self.quant_grid, zero_point=False, round_method="up")
-                    if self.scale is None:
-                        self.scale = get_quant_weight_mxfp(x[:,i1:i2], input_x=self.inp_for_w[:,i1:i2], quant_grid=quant_grid, zero_point=False, round_method="w_search")
-                        # print(self.scale.dtype, flush=True)
-                    else:
-                        tmp = get_quant_weight_mxfp(x[:,i1:i2], input_x=self.inp_for_w[:,i1:i2], quant_grid=quant_grid, zero_point=False, round_method="w_search")
-                        self.scale = torch.cat((self.scale, tmp), dim=0)
-                
-                
-                # self.scale = get_quant_weight_mxfp(w=x, quant_grid=quant_grid, input_x=self.inp_for_w, round_method="w_search")
-                
-                self.w = False
-                del self.inp_for_w
-                torch.cuda.empty_cache()
-            
-            
-            elif round_method == "mrq_naive":
-                abs_max = torch.max(xmax.abs(),xmin.abs())
-            
-                exp = torch.floor(torch.log2(abs_max)) - torch.floor(torch.log2(max_quant_val))
-                
-                # scales = (max_val * alpha) / max_quant_val
-                self.scale = torch.pow(2, exp).to(torch.half)
-                
-            elif round_method == "normal":
-                abs_max = torch.max(xmax.abs(),xmin.abs())
-                self.scale = abs_max / max_quant_val
-            
-            elif round_method == "nvfp":
-                abs_max = torch.max(xmax.abs(),xmin.abs())
-                
-                scales = (abs_max / max_quant_val).to(torch.half)
-                scales = scales.view(torch.short)
-                hi = scales & 0xFF80
-                r = scales & 0x0040
-                
-                scales = hi + r * 2
-                
-                self.scale = scales.view(torch.half)
-                
-            elif round_method == "org":
-                self.scale = None
-                
-                
-            # scales_up = torch.pow(2, (torch.ceil(torch.log2(abs_max*0.88/max_quant_val))))
-            # self.scale = scales_up
-            
-            # zero_point = 6.0 * torch.ones_like(self.scale)
-            
-            
-            # print("asymmetric", flush=True)
-            # range = xmax - xmin
-            # scale = range / (2**self.n_bits-1)
-            # self.scale = scale.clamp(min=CLIPMIN, max=CLIPMAX)
-            # zero_point = -(xmin) / (self.scale)
-        # self.round_zero_point = zero_point.clamp(min=-CLIPMAX, max=CLIPMAX).round()
-        # print(self.round_zero_point, flush=True)
+        round_method = "mrq_naive"
+        # round_method = "org"
         
+        
+        abs_max = torch.max(xmax.abs(),xmin.abs())
+        # scale = abs_max / (2**(self.n_bits-1)-1)
+        
+        quant_grid = torch.tensor([0.0,  0.5,  1.0,  1.5,  2.0,  3.0,  4.0,  6.0,
+                                    -0.0, -0.5, -1.0, -1.5, -2.0, -3.0, -4.0, -6.0]).to(abs_max.device).to(torch.half)
+        
+        # quant_grid = torch.tensor([0.0,  1.0,  2.0,  3.0,  4.0, 5.0,  6.0, 7.0,
+        #                           -0.0, -1.0, -2.0, -3.0, -4.0, -5.0, -6.0, -7.0]).to(abs_max.device).to(abs_max.dtype)
+        
+        max_quant_val = max(quant_grid)
+        
+        if self.a and self.w_for_a != None:
+            search_tw = False
+            if search_tw:
+                # search clipping ratio of activation in tensor-wise
+                min_clip_r = 0.9
+                max_clip_r = 2.0
+                
+                
+                opt_mse = 100000.0
+                if len(x.shape) > 2:
+                    x = x.reshape(x.shape[-2], x.shape[-1])
+                
+                origin_output = torch.mm(x, (self.w_for_a.T))
+                
+                origin_input = x.reshape(-1, 32)
+                
+                origin_max = origin_input.abs().amax(dim=1, keepdim=True)
+                
+                
+                
+                while max_clip_r - min_clip_r > 0.005:
+                    step = (max_clip_r - min_clip_r) / 5
+                    for clip_r in np.arange(min_clip_r, max_clip_r+step, step):
+                        
+                        d_input = x.reshape(-1, 32)
+                        d_input, _, _, _ = get_quant_act_mxfp(x=d_input, quant_grid=quant_grid, zero_point=False, round_method="rtn", x_clip_r=clip_r)
+                        d_input = d_input.reshape(x.shape)
+                        
+                        # minimize the quantization error of outliers
+                        d_output = torch.mm(d_input, self.w_for_a.T)
+                        
+                        
+                        # tmp_mse = ((d_max - origin_max).to(torch.float32) / origin_max.to(torch.float32)).abs().mean(dim=0)
+                        
+                        # kl divergence
+                        # div = d_output.abs() / origin_output.abs()
+                        # div = torch.where(torch.isinf(div), torch.ones_like(div).to(div.device), div)
+                        # div = torch.where(torch.isnan(div), torch.ones_like(div).to(div.device), div)
+                        
+                        # kl_diver = ((div) * d_output.abs()).to(torch.float32).mean(dim=1).sum(dim=0)
+                        
+                        # tmp_mse = (d_output - origin_output).abs().to(torch.float32).sum(dim=1).mean(dim=0)
+                        
+                        
+                        
+                        # tmp_mse = (d_output - origin_output).abs().to(torch.float32).amax(dim=1).mean(dim=0)
+                        
+                        tmp_mse = (d_output - origin_output).abs().to(torch.float32).mean(dim=0).mean(dim=0)
+                        # print(kl_diver)
+                        # print(tmp_mse)
+                        if tmp_mse < opt_mse:
+                            opt_mse = tmp_mse
+                            opt_clip_r = clip_r
+                            
+                            
+                    max_clip_r = opt_clip_r + step
+                    min_clip_r = opt_clip_r - step
+                    
+                self.lac = opt_clip_r
+                # self.x_clip_tw = opt_clip_r
+                # d_input = input.reshape(-1, 32)
+                # d_input, _, _, _ = get_quant_act_mxfp(x=d_input, weight=None, quant_grid=self.quant_grid, zero_point=False, round_method="up", x_clip_r=opt_clip_r)
+                # deq_input = d_input.reshape(input.shape)
+                
+                print(f"Opt clip ratio: {opt_clip_r}, opt mse: {opt_mse}", flush=True)
+                
+                
+                if opt_mse > 0.04 :
+                    self.scale = None
+                    self.skip_quant = True
+                    return
+                
+            self.a = False
+            del self.w_for_a
+            torch.cuda.empty_cache()
+        # if self.lac:
+        #     print(self.lac, flush=True)
+                
+            
+        if self.swc:
+            xmax = self.swc*xmax
+            xmin = self.swc*xmin
+        elif self.lwc:
+            xmax = self.sigmoid(self.upbound_factor.to(x.device))*xmax
+            xmin = self.sigmoid(self.lowbound_factor.to(x.device))*xmin
+        elif self.lac:
+            xmax = self.lac*xmax
+            xmin = self.lac*xmin
+        
+        if self.w and self.inp_for_w != None:
+            
+            for i1 in range(0, x.shape[-1], 32):
+                i2 = min(i1 + 32, x.shape[-1])
+                # deq_weight[i*N : (i+1)*N, :], _, up_ratio = get_quant_weight_mxfp(weight[i*N : (i+1)*N, :], input_x=input[i*M : (i+1)*M, :], quant_grid=self.quant_grid, zero_point=False, round_method="up")
+                if self.scale is None:
+                    self.scale = get_quant_weight_mxfp(x[:,i1:i2], input_x=self.inp_for_w[:,i1:i2], quant_grid=quant_grid, zero_point=False, round_method="w_search")
+                    # print(self.scale.dtype, flush=True)
+                else:
+                    tmp = get_quant_weight_mxfp(x[:,i1:i2], input_x=self.inp_for_w[:,i1:i2], quant_grid=quant_grid, zero_point=False, round_method="w_search")
+                    self.scale = torch.cat((self.scale, tmp), dim=0)
+            
+            
+            # self.scale = get_quant_weight_mxfp(w=x, quant_grid=quant_grid, input_x=self.inp_for_w, round_method="w_search")
+            
+            self.w = False
+            del self.inp_for_w
+            torch.cuda.empty_cache()
+        
+        
+        elif round_method == "mrq_naive":
+            abs_max = torch.max(xmax.abs(),xmin.abs())
+            
+        
+            exp = torch.floor(torch.log2(abs_max)) - torch.floor(torch.log2(max_quant_val))
+            
+            # scales = (max_val * alpha) / max_quant_val
+            self.scale = torch.pow(2, exp).to(torch.half)
+            
+        elif round_method == "normal":
+            abs_max = torch.max(xmax.abs(),xmin.abs())
+            self.scale = abs_max / max_quant_val
+        
+        elif round_method == "nvfp":
+            abs_max = torch.max(xmax.abs(),xmin.abs())
+            
+            scales = abs_max / max_quant_val
+            scales = scales.view(torch.short)
+            hi = scales & 0xFF80
+            r = scales & 0x0040
+            
+            scales = hi + r * 2
+            
+            self.scale = scales.view(torch.half)
+            
+        elif round_method == "org":
+            self.scale = None
+            
+            
+        # scales_up = torch.pow(2, (torch.ceil(torch.log2(abs_max*0.88/max_quant_val))))
+        # self.scale = scales_up
+        
+        # zero_point = 6.0 * torch.ones_like(self.scale)
+        
+        
+        # print("asymmetric", flush=True)
+        # range = xmax - xmin
+        # scale = range / (2**self.n_bits-1)
+        # self.scale = scale.clamp(min=CLIPMIN, max=CLIPMAX)
+        # zero_point = -(xmin) / (self.scale)
+    # self.round_zero_point = zero_point.clamp(min=-CLIPMAX, max=CLIPMAX).round()
+    # print(self.round_zero_point, flush=True)
+    
     def register_scales_and_zeros(self):
         self.register_buffer('scales', self.scale)
         self.register_buffer('zeros', self.round_zero_point)
@@ -1029,3 +968,16 @@ def get_quant_act_mxfp(x, quant_grid, weight=None, zero_point=True, q_group_size
         return x_deq.to(torch.half), quant_mse_sum, 1, labels
     
     
+def my_function():
+    my_function.calls = getattr(my_function, 'calls', 0) + 1  # 初始化或递增
+    return my_function.calls
+    
+# def counter():
+#     count = 0  # 闭包变量（类似静态变量）
+
+#     def increment():
+#         nonlocal count
+#         count += 1
+#         return count
+
+#     return increment()
