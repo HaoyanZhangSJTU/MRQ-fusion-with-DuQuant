@@ -74,7 +74,19 @@ class QuantQwen3MLP(nn.Module):
             self.up_proj.copy_quantizers_duquant_params(self.gate_proj)
             mul = act * self.up_proj(x)
             return self.down_proj(mul)
-        return self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
+        
+
+        ffn_gated = self.act_fn(self.gate_proj(x)) * self.up_proj(x)
+
+        fp16_max = torch.finfo(torch.float16).max  # 65504.0
+        ffn_gated = torch.nan_to_num(ffn_gated, nan=0.0, posinf=fp16_max, neginf=-fp16_max)
+        ffn_gated = ffn_gated.clamp(min=-fp16_max, max=fp16_max)
+
+        assert torch.isnan(ffn_gated).sum() == 0, f"nan in act_gate_up, {torch.isnan(ffn_gated).sum() == 0}"
+        assert torch.isinf(ffn_gated).sum() == 0, f"inf in act_gate_up, {torch.isinf(ffn_gated).sum() == 0}"
+
+        return self.down_proj(ffn_gated)
+        # return self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
 
 
 # ---------------------------
@@ -102,11 +114,6 @@ class QuantQwen3Attention(nn.Module):
         self.attention_dropout = config.attention_dropout
         self.is_causal = True
 
-        if (self.head_dim * self.num_heads) != self.hidden_size:
-            raise ValueError(
-                f"hidden_size must be divisible by num_heads (got `hidden_size`: {self.hidden_size}"
-                f" and `num_heads`: {self.num_heads})."
-            )
 
         self.layer_idx = layer_id  # [QWEN3-FIX] 供 Cache.update 使用
 
@@ -244,7 +251,9 @@ class QuantQwen3Attention(nn.Module):
                 f"`attn_output` should be of size {(bsz, self.num_heads, q_len, self.head_dim)}, but is {attn_output.size()}"
             )
 
-        attn_output = attn_output.transpose(1, 2).reshape(bsz, q_len, self.hidden_size)
+        # attn_output = attn_output.transpose(1, 2).reshape(bsz, q_len, self.hidden_size)
+        attn_output = attn_output.transpose(1, 2).reshape(bsz, q_len, self.num_heads * self.head_dim)
+
         attn_output = self.o_proj(attn_output)
 
         if not output_attentions:
@@ -321,6 +330,7 @@ class QuantQwen3DecoderLayer(nn.Module):
         # MLP
         residual = hidden_states
         hidden_states = self.post_attention_layernorm(hidden_states).half()
+        # hidden_states = self.post_attention_layernorm(hidden_states)
         hidden_states = self.mlp(hidden_states.to(self.mlp.up_proj.weight.device)).to(residual.device)
         # hidden_states = residual + hidden_states
         hidden_states = (residual + hidden_states).to(residual.dtype) # dtype FIX；否则 lm_head 的输入 dtype 为 float32
