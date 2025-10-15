@@ -455,7 +455,9 @@ class UniformAffineQuantizer(nn.Module):
         #         # self.a
         #         return x
             # distri_3d(x.abs().squeeze(0).T, layer_name=self.layer_name, layer_idx=layer_id, desc="before")
-        
+        if self.layer_id is not None and (self.layer_id <=6 or self.layer_id >= 69) and self.a == True:
+    
+            return x
         
             
         # if self.layer_name:
@@ -548,7 +550,7 @@ class UniformAffineQuantizer(nn.Module):
         max_quant_val = max(quant_grid)
         
         if self.a and self.w_for_a != None:
-            search_tw = False
+            search_tw = True
             if search_tw:
                 # search clipping ratio of activation in tensor-wise
                 min_clip_r = 0.9
@@ -606,12 +608,15 @@ class UniformAffineQuantizer(nn.Module):
                     min_clip_r = opt_clip_r - step
                     
                 self.lac = opt_clip_r
+                
+                # if self.lac > 2.0:
+                #     self.lac = 1.13
                 # self.x_clip_tw = opt_clip_r
                 # d_input = input.reshape(-1, 32)
                 # d_input, _, _, _ = get_quant_act_mxfp(x=d_input, weight=None, quant_grid=self.quant_grid, zero_point=False, round_method="up", x_clip_r=opt_clip_r)
                 # deq_input = d_input.reshape(input.shape)
                 
-                print(f"Opt clip ratio: {opt_clip_r}, opt mse: {opt_mse}", flush=True)
+                print(f"layer {self.layer_id}, {self.layer_name}, Opt clip ratio: {opt_clip_r}, opt mse: {opt_mse}", flush=True)
                 
                 
                 if opt_mse > 0.04 :
@@ -637,7 +642,7 @@ class UniformAffineQuantizer(nn.Module):
             xmin = self.lac*xmin
         
         if self.w and self.inp_for_w != None:
-            
+            # print("w search")
             for i1 in range(0, x.shape[-1], 32):
                 i2 = min(i1 + 32, x.shape[-1])
                 # deq_weight[i*N : (i+1)*N, :], _, up_ratio = get_quant_weight_mxfp(weight[i*N : (i+1)*N, :], input_x=input[i*M : (i+1)*M, :], quant_grid=self.quant_grid, zero_point=False, round_method="up")
@@ -946,6 +951,20 @@ def get_quant_act_mxfp(x, quant_grid, weight=None, zero_point=True, q_group_size
     labels = (((x + zeros) / scales).unsqueeze(-1) - quant_grid).abs().argmin(dim=-1)
     # print(labels, labels.shape, quant_grid, quant_grid.shape)
     x_deq = quant_grid[labels] * scales - zeros
+    
+    # batch_num = 8
+    # assert x.shape[0] % batch_num == 0
+    # batch_size = x.shape[0] // batch_num
+    # tensor_deq = torch.zeros_like(x)
+    # for idx in range(batch_num):
+    #     tensor_par = x[idx*batch_size : (idx+1)*batch_size, :]
+    #     labels = ((tensor_par).unsqueeze(-1) - quant_grid).abs().argmin(dim=-1)
+    #     tensor_q_par = quant_grid[labels] 
+    #     tensor_deq[idx*batch_size : (idx+1)*batch_size, :] = tensor_q_par
+    
+    
+    # x_deq =  tensor_deq
+    
     
     
     # deal with zero channels

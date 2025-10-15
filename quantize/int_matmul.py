@@ -40,8 +40,8 @@ class QuantMatMul(nn.Module):
         return x1
 
     def quant_x2(self, x2):
-        # if self.use_act_quant:
-        x2 = self.x2_quantizer(x2)
+        if self.use_act_quant:
+            x2 = self.x2_quantizer(x2)
         return x2
 
     def forward(self, x1, x2):

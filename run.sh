@@ -9,7 +9,8 @@ python main.py \
     --smooth \
     --lac 1.15 \
     --swc 1.15 \
-    --task arc_easy,arc_challenge,winogrande,piqa \
+    --task hellaswag
+    # --task arc_easy,arc_challenge,winogrande,piqa \
 
 
 
